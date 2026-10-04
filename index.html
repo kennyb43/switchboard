@@ -661,6 +661,106 @@
             box-shadow: none;
         }
 
+        /* ---- Rotate in place ------------------------------------------------
+           Clicking a cyan cell pins the tile there. The pinned ghost is solid
+           rather than dashed, and clicking it again turns it. The controls sit
+           beside the tile, so you never scroll back to the toolbar. */
+        .cell.valid-placement.pinned {
+            animation: none;
+            background: rgba(0, 255, 255, 0.45);
+            cursor: alias;
+        }
+
+        .ghost-tile.pinned,
+        body.tiles-physical .ghost-tile.pinned {
+            opacity: 1;
+            border: 2px solid #00ffff;
+            box-shadow: 0 0 0 2px rgba(0,255,255,0.35), 0 0 18px rgba(0,255,255,0.55);
+        }
+
+        .ghost-tile.spin-cw  { animation: ghost-spin-cw 0.18s ease-out; }
+        .ghost-tile.spin-ccw { animation: ghost-spin-ccw 0.18s ease-out; }
+
+        /* `rotate` composes with the lift transform physical tiles already use. */
+        @keyframes ghost-spin-cw  { from { rotate: -90deg; } to { rotate: 0deg; } }
+        @keyframes ghost-spin-ccw { from { rotate: 90deg; }  to { rotate: 0deg; } }
+
+        .ghost-tile .ghost-token {
+            opacity: 0.9;
+        }
+
+        .place-controls {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 4px;
+            padding: 4px;
+            background: rgba(10, 20, 35, 0.92);
+            border: 1px solid rgba(0,255,255,0.6);
+            border-radius: 8px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+            z-index: 30;
+            white-space: nowrap;
+        }
+
+        /* Bottom row: above the tile, so it isn't pushed out of the scroll area. */
+        .place-controls.above {
+            top: auto;
+            bottom: calc(100% + 6px);
+        }
+
+        .place-controls.align-left  { left: 0; transform: none; }
+        .place-controls.align-right { left: auto; right: 0; transform: none; }
+
+        .place-controls button {
+            width: 30px;
+            height: 30px;
+            border: none;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.12);
+            color: #fff;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+
+        .place-controls button:hover:not(:disabled) {
+            background: rgba(255,255,255,0.25);
+        }
+
+        .place-controls button.confirm {
+            background: #4CAF50;
+            font-weight: bold;
+        }
+
+        .place-controls button.confirm:hover {
+            background: #45a049;
+        }
+
+        .place-controls button:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+
+        .place-controls button:focus-visible {
+            outline: 3px solid #7eb8ff;
+            outline-offset: 1px;
+        }
+
+        /* "1 of 3" ways this tile fits the pinned spot. */
+        .place-controls .fit-count {
+            align-self: center;
+            font-size: 11px;
+            color: #9fe;
+            padding: 0 4px;
+        }
+
         /* The message bar is the primary instruction channel, so it gets its own
            row instead of being squeezed into a wrapping toolbar. */
         .message-bar {
@@ -3383,7 +3483,7 @@
             document.querySelectorAll('#board .tile').forEach(el => {
                 snapshot.tiles[el.dataset.tileid] = el.getBoundingClientRect();
             });
-            document.querySelectorAll('#board .token').forEach(el => {
+            document.querySelectorAll('#board .token:not(.ghost-token)').forEach(el => {
                 snapshot.tokens[el.dataset.player] = el.getBoundingClientRect();
             });
             return snapshot;
@@ -3423,7 +3523,7 @@
             };
 
             document.querySelectorAll('#board .tile').forEach(el => play(el, el.dataset.tileid, snapshot.tiles));
-            document.querySelectorAll('#board .token').forEach(el => play(el, el.dataset.player, snapshot.tokens));
+            document.querySelectorAll('#board .token:not(.ghost-token)').forEach(el => play(el, el.dataset.player, snapshot.tokens));
         }
 
         // Size the board so the whole grid fits the window, without the player having
@@ -3623,8 +3723,20 @@
                         // Check if this is a valid placement
                         if (gameState.phase === 'placeTile' && gameState.validPlacements.includes(gridPos)) {
                             cell.classList.add('valid-placement');
-                            cell.addEventListener('mouseenter', () => showGhostTile(cell));
-                            cell.addEventListener('mouseleave', () => clearGhostTile(cell));
+                            if (gameState.movingTile && gameState.movingTile.target === gridPos) {
+                                cell.classList.add('pinned');
+                                drawPinnedGhost(cell, gridPos);
+                                // Wheel over the pinned tile turns it. Non-passive so the
+                                // page doesn't scroll at the same time.
+                                cell.addEventListener('wheel', onPinnedWheel, { passive: false });
+                            } else {
+                                // A hover preview only while nothing is pinned; with a pin,
+                                // ghosts on other cells would compete with the real choice.
+                                cell.addEventListener('mouseenter', () => {
+                                    if (!gameState.movingTile || !gameState.movingTile.target) showGhostTile(cell);
+                                });
+                                cell.addEventListener('mouseleave', () => clearGhostTile(cell));
+                            }
                         }
 
                         cell.addEventListener('click', () => handleCellClick(gridPos));
@@ -3830,29 +3942,241 @@
 
         // Ghost of the tile in hand, drawn in the cell under the cursor. The 40px
         // toolbar thumbnail sits far from where the decision is made.
-        function showGhostTile(cell) {
-            if (viewIndex !== null) return;
-            if (!gameState.movingTile) return;
-            clearGhostTile(); // clear any stale ghost, not just this cell's
+        // ================================================================
+        //  ROTATE IN PLACE
+        //  Placing used to mean: rotate with the toolbar button, then find a
+        //  cyan cell. On a board bigger than the window that meant scrolling
+        //  back to the top for every quarter turn. Now:
+        //    1. click a cyan cell  -> the tile is pinned there, already turned
+        //                             to an orientation that fits
+        //    2. click it again     -> it turns to the next orientation that fits
+        //                             (T / Shift+T or the mouse wheel work too)
+        //    3. ✓ beside the tile, or Enter -> placed
+        //  A cell is cyan when the tile fits there in *any* orientation, and
+        //  only fitting orientations are offered, so a turn is never wasted.
+        // ================================================================
 
-            const rotatedSpots = getRotatedSpots(gameState.movingTile.spots, gameState.movingTile.rotation);
+        // Orientations of the tile in hand that are legal at this cell.
+        function legalRotationsAt(gridPos) {
+            const mt = gameState.movingTile;
+            if (!mt) return [];
+            return [0, 1, 2, 3].filter(r => isValidPlacement(gridPos, mt.spots, r));
+        }
+
+        // What a cell shows: the orientation in hand if it fits there, otherwise
+        // the next one clockwise that does.
+        function preferredRotationAt(gridPos) {
+            const legal = legalRotationsAt(gridPos);
+            if (legal.length === 0) return null;
+            const current = gameState.movingTile.rotation;
+            for (let i = 0; i < 4; i++) {
+                const r = (current + i) % 4;
+                if (legal.includes(r)) return r;
+            }
+            return legal[0];
+        }
+
+        // Every cell the tile fits in some orientation.
+        function findPlacementsAnyRotation(spots) {
+            const all = new Set();
+            for (let r = 0; r < 4; r++) {
+                findValidPlacements(spots, r).forEach(p => all.add(p));
+            }
+            return Array.from(all);
+        }
+
+        // The tile's ghost at a given orientation, riders included, so you can
+        // see where a pawn on the tile will end up before committing.
+        function buildGhost(rotation) {
+            const mt = gameState.movingTile;
+            const rotatedSpots = getRotatedSpots(mt.spots, rotation);
             const ghost = document.createElement('div');
             ghost.className = 'ghost-tile';
-            applyTileGrain(ghost, gameState.movingTile.tileId, gameState.movingTile.rotation);
+            applyTileGrain(ghost, mt.tileId, rotation);
             ghost.appendChild(buildTilePaths(null, rotatedSpots, { skipStubs: true }));
             buildTileSpots(null, rotatedSpots, false).forEach(el => ghost.appendChild(el));
 
             const label = document.createElement('div');
             label.className = 'tile-number';
-            label.textContent = gameState.movingTile.tileId;
+            label.textContent = mt.tileId;
             ghost.appendChild(label);
 
-            cell.appendChild(ghost);
+            const turns = (rotation - mt.originalRotation + 4) % 4;
+            (mt.playersOnTile || []).forEach(({ playerIdx, spotPos }, i) => {
+                let pos = spotPos;
+                for (let r = 0; r < turns; r++) pos = rotatePos(pos);
+                const c = posCoords[pos];
+                const player = gameState.players[playerIdx];
+                const token = document.createElement('div');
+                token.className = `token ghost-token ${player.color}`;
+                token.innerHTML = PAWN_SVG;
+                const nudge = i === 0 ? 0 : (i % 2 ? 1 : -1);
+                token.style.left = `calc(${c.x}% + var(--stack-offset) * ${nudge})`;
+                token.style.top = `calc(${c.y}% - var(--token-size) * 0.35)`;
+                token.style.transform = 'translate(-50%, -50%)';
+                ghost.appendChild(token);
+            });
+
+            return ghost;
         }
 
+        // Hover preview on a cyan cell (only while nothing is pinned).
+        function showGhostTile(cell) {
+            if (viewIndex !== null) return;
+            if (!gameState.movingTile) return;
+            clearGhostTile(); // clear any stale hover ghost, not just this cell's
+
+            const rotation = preferredRotationAt(cell.dataset.gridpos);
+            if (rotation === null) return;
+            cell.appendChild(buildGhost(rotation));
+        }
+
+        // Hover ghosts only. The pinned ghost is removed by re-rendering.
         function clearGhostTile(cell) {
             const scope = cell || document;
-            scope.querySelectorAll('.ghost-tile').forEach(el => el.remove());
+            scope.querySelectorAll('.ghost-tile:not(.pinned)').forEach(el => el.remove());
+        }
+
+        // The pinned ghost and its controls, drawn into the target cell.
+        function drawPinnedGhost(cell, gridPos, spin) {
+            const mt = gameState.movingTile;
+            const ghost = buildGhost(mt.rotation);
+            ghost.classList.add('pinned');
+            if (spin) ghost.classList.add(spin === 'ccw' ? 'spin-ccw' : 'spin-cw');
+            cell.appendChild(ghost);
+
+            const legal = legalRotationsAt(gridPos);
+            const canTurn = legal.length > 1;
+
+            const bar = document.createElement('div');
+            bar.className = 'place-controls';
+            const [row, col] = gridPos.split(',').map(Number);
+            if (row === gridBounds.maxRow) bar.classList.add('above');
+            if (col === gridBounds.minCol) bar.classList.add('align-left');
+            else if (col === gridBounds.maxCol) bar.classList.add('align-right');
+
+            const addButton = (text, label, cls, onClick, disabled) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.textContent = text;
+                b.title = label;
+                b.setAttribute('aria-label', label);
+                if (cls) b.className = cls;
+                b.disabled = !!disabled;
+                b.addEventListener('click', (e) => {
+                    e.stopPropagation();   // a click on the cell itself means "turn"
+                    onClick();
+                });
+                bar.appendChild(b);
+                return b;
+            };
+
+            const turnHint = canTurn ? '' : ' (only one way fits here)';
+            addButton('⟲', `Turn anticlockwise (Shift+T)${turnHint}`, '', () => rotateHeld(-1), !canTurn);
+            addButton('⟳', `Turn clockwise (T, or click the tile)${turnHint}`, '', () => rotateHeld(1), !canTurn);
+
+            const count = document.createElement('span');
+            count.className = 'fit-count';
+            count.textContent = canTurn ? `${legal.indexOf(mt.rotation) + 1} of ${legal.length}` : '1 way';
+            count.title = canTurn ? `${legal.length} orientations fit here` : 'Only one orientation fits here';
+            bar.appendChild(count);
+
+            addButton('✓', 'Place the tile here (Enter)', 'confirm', confirmPlacement, false);
+            addButton('✕', 'Put the tile back (Esc twice)', '', () => {
+                document.getElementById('cancelMoveBtn').click();
+            }, false);
+
+            // Clicks in the bar must never fall through to the cell.
+            bar.addEventListener('click', (e) => e.stopPropagation());
+            cell.appendChild(bar);
+        }
+
+        // Redraw just the pinned cell, so turning doesn't rebuild the board.
+        function refreshPinnedGhost(spin) {
+            const mt = gameState.movingTile;
+            if (!mt || !mt.target) return;
+            const cell = document.querySelector(`#board .cell[data-gridpos="${mt.target}"]`);
+            if (!cell) { render(); return; }
+            cell.querySelectorAll('.ghost-tile, .place-controls').forEach(el => el.remove());
+            drawPinnedGhost(cell, mt.target, spin);
+        }
+
+        function pinnedMessage() {
+            const mt = gameState.movingTile;
+            const n = legalRotationsAt(mt.target).length;
+            return n > 1
+                ? `Tile ${mt.tileId}: ${n} ways fit here. Click the tile again to turn it, then ✓ (or Enter) to place. Click another cyan space to try there.`
+                : `Tile ${mt.tileId} fits here only one way. Click it again or ✓ (Enter) to place, or pick another cyan space.`;
+        }
+
+        function pinPlacement(gridPos) {
+            const mt = gameState.movingTile;
+            if (!mt) return;
+            const rotation = preferredRotationAt(gridPos);
+            if (rotation === null) return;
+            mt.target = gridPos;
+            mt.rotation = rotation;
+            clearGhostTile();
+            updateTilePreview();
+            showMessage(pinnedMessage());
+            render();
+            updateButtons();
+        }
+
+        function unpinPlacement() {
+            const mt = gameState.movingTile;
+            if (!mt || !mt.target) return;
+            mt.target = null;
+            showMessage(`Moving tile ${mt.tileId}. Click a cyan space to put it there.`);
+            render();
+            updateButtons();
+        }
+
+        // dir: +1 clockwise, -1 anticlockwise.
+        function rotateHeld(dir) {
+            if (viewIndex !== null) return;
+            const mt = gameState.movingTile;
+            if (!mt || gameState.phase !== 'placeTile') return;
+
+            if (mt.target) {
+                // Pinned: step through the orientations that fit this cell only.
+                const legal = legalRotationsAt(mt.target);
+                if (legal.length <= 1) {
+                    showMessage(`Only one way fits here. ✓ (or Enter) to place, or pick another cyan space.`);
+                    return;
+                }
+                const i = legal.indexOf(mt.rotation);
+                mt.rotation = legal[((i < 0 ? 0 : i) + dir + legal.length) % legal.length];
+                updateTilePreview();
+                refreshPinnedGhost(dir > 0 ? 'cw' : 'ccw');
+                showMessage(pinnedMessage());
+                return;
+            }
+
+            // Not pinned yet: turn the tile in hand; the hover preview follows.
+            mt.rotation = (mt.rotation + dir + 4) % 4;
+            updateTilePreview();
+            const hovered = document.querySelector('#board .cell.valid-placement:hover');
+            if (hovered) showGhostTile(hovered);
+        }
+
+        // Trackpads fire dozens of wheel events per swipe; one turn per gesture.
+        // A pause between events starts a new gesture; a long swipe still turns,
+        // but no faster than every 400ms.
+        let lastWheelTurn = 0;
+        let lastWheelEvent = 0;
+        function onPinnedWheel(e) {
+            const mt = gameState.movingTile;
+            if (!mt || !mt.target || legalRotationsAt(mt.target).length <= 1) return;   // let the page scroll
+            const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+            if (Math.abs(delta) < 1) return;
+            e.preventDefault();
+            const now = performance.now();
+            const newGesture = now - lastWheelEvent > 250;
+            lastWheelEvent = now;
+            if (!newGesture && now - lastWheelTurn < 400) return;
+            lastWheelTurn = now;
+            rotateHeld(delta > 0 ? 1 : -1);
         }
 
         function handleSpotClick(nodeId) {
@@ -3890,6 +4214,7 @@
                         spots: JSON.parse(JSON.stringify(tile.spots)),
                         rotation: tile.rotation,
                         originalRotation: tile.rotation,
+                        target: null,      // cell the tile is pinned to, before confirming
                         playersOnTile: [] // Track players riding on this tile
                     };
 
@@ -3906,11 +4231,9 @@
                     // Remove tile from board temporarily
                     delete boardState[gridPos];
 
-                    // Find valid placements
-                    gameState.validPlacements = findValidPlacements(
-                        gameState.movingTile.spots,
-                        gameState.movingTile.rotation
-                    );
+                    // Cells where the tile fits in any orientation. Turning happens
+                    // after choosing a cell, so a fit in some other orientation counts.
+                    gameState.validPlacements = findPlacementsAnyRotation(gameState.movingTile.spots);
 
                     gameState.phase = 'placeTile';
 
@@ -3919,16 +4242,40 @@
                     document.getElementById('tileControls').classList.add('show');
                     document.getElementById('movingTileId').textContent = tile.tileId;
 
-                    showMessage(`Moving tile ${tile.tileId}. Click a cyan space to place it, or rotate first.`);
+                    showMessage(`Moving tile ${tile.tileId}. Click a cyan space to put it there, then click it again to turn it.`);
                     render();
                     updateButtons();
                 }
             }
         }
 
+        // First click on a cyan cell pins the tile there; clicking the pinned
+        // cell again turns it (or places it, when only one orientation fits).
         function handleCellClick(gridPos) {
             if (viewIndex !== null) return;   // read-only while reviewing
-            if (gameState.phase === 'placeTile' && gameState.validPlacements.includes(gridPos)) {
+            if (gameState.phase !== 'placeTile' || !gameState.movingTile) return;
+            if (!gameState.validPlacements.includes(gridPos)) return;
+
+            if (gameState.movingTile.target === gridPos) {
+                if (legalRotationsAt(gridPos).length > 1) rotateHeld(1);
+                else confirmPlacement();
+            } else {
+                pinPlacement(gridPos);
+            }
+        }
+
+        function confirmPlacement() {
+            if (viewIndex !== null) return;
+            const mt = gameState.movingTile;
+            if (gameState.phase !== 'placeTile' || !mt || !mt.target) return;
+            const gridPos = mt.target;
+            // Belt and braces: never commit an orientation that doesn't fit.
+            if (!isValidPlacement(gridPos, mt.spots, mt.rotation)) {
+                const r = preferredRotationAt(gridPos);
+                if (r === null) return;
+                mt.rotation = r;
+            }
+            {
                 // Place the tile here
                 const tileId = gameState.movingTile.tileId;
                 const fromGridPos = gameState.movingTile.fromGridPos;
@@ -4046,21 +4393,8 @@
             document.getElementById('movingTileId').textContent = gameState.movingTile.tileId;
         }
 
-        // Rotate button
-        document.getElementById('rotateBtn').addEventListener('click', () => {
-            if (gameState.movingTile) {
-                gameState.movingTile.rotation = (gameState.movingTile.rotation + 1) % 4;
-
-                // Recalculate valid placements
-                gameState.validPlacements = findValidPlacements(
-                    gameState.movingTile.spots,
-                    gameState.movingTile.rotation
-                );
-
-                updateTilePreview();
-                render();
-            }
-        });
+        // Toolbar rotate button: same as clicking the pinned tile (or T).
+        document.getElementById('rotateBtn').addEventListener('click', () => rotateHeld(1));
 
         // Put a picked-up tile back exactly as it was, pawns included.
         //
@@ -5116,9 +5450,20 @@
                     return;
                 }
                 if (gameState.phase === 'placeTile') {
-                    document.getElementById('cancelMoveBtn').click();
+                    // First Esc lets go of the chosen cell; a second puts the tile back.
+                    if (gameState.movingTile && gameState.movingTile.target) unpinPlacement();
+                    else document.getElementById('cancelMoveBtn').click();
                     return;
                 }
+            }
+
+            // Enter places a pinned tile. Skipped on buttons, where Enter
+            // already means "press this button".
+            if (e.key === 'Enter' && tag !== 'button' &&
+                gameState.phase === 'placeTile' && gameState.movingTile && gameState.movingTile.target) {
+                e.preventDefault();
+                confirmPlacement();
+                return;
             }
 
             // Help works anywhere, including the setup screen.
@@ -5143,7 +5488,11 @@
                     press('rollBtn');
                     break;
                 case 't':
-                    press('rotateBtn');
+                    // T turns clockwise, Shift+T anticlockwise.
+                    if (gameState.phase === 'placeTile' && viewIndex === null) {
+                        e.preventDefault();
+                        rotateHeld(e.shiftKey ? -1 : 1);
+                    }
                     break;
                 case ' ':
                     // Space ends the turn: skip the shift, or place-then-end.
@@ -5380,8 +5729,10 @@
 
                             <ul>
                                 <li><strong>Click</strong> a glowing tile to pick it up</li>
-                                <li><strong>Rotate</strong> using the 🔄 button if desired</li>
-                                <li><strong>Place</strong> it on any valid highlighted space</li>
+                                <li><strong>Choose a spot:</strong> click a cyan space. The tile appears there, already turned a way that fits</li>
+                                <li><strong>Turn it:</strong> click the tile again to try the next way that fits. You can also press <strong>T</strong> (Shift+T turns it back) or use the mouse wheel over it</li>
+                                <li><strong>Place it:</strong> click ✓ next to the tile, or press <strong>Enter</strong>. To try a different spot, click another cyan space</li>
+                                <li>Esc lets go of the spot; press it again (or ✕) to put the tile back</li>
                                 <li>Players riding on a moved tile travel with it!</li>
                             </ul>
 
